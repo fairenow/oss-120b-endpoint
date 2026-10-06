@@ -27,31 +27,44 @@ openai/gpt-oss-120b
 H100 GPU
 ```
 
-The model is pinned server-side to `openai/gpt-oss-120b`. A persistent Modal Volume is mounted as the Hugging Face cache so downloaded model weights survive container shutdowns.
+A persistent Modal Volume is mounted as the Hugging Face cache so downloaded model weights survive container shutdowns.
 
-## Install
+## Install / update Modal locally
+
+On macOS, prefer Python's module form rather than assuming the `pip` executable is on PATH:
 
 ```bash
-pip install -U modal
+python3 -m pip install -U modal openai
+```
+
+If your Python installation says that `pip` itself is missing:
+
+```bash
+python3 -m ensurepip --upgrade
+python3 -m pip install -U modal openai
+```
+
+Authenticate once:
+
+```bash
 modal setup
 ```
 
 ## Deploy
 
-From the repository root:
-
 ```bash
+git pull
 modal deploy modal_gpt_oss_120b.py
 ```
 
-Modal will print the HTTPS endpoint after deployment.
+The deployment intentionally uses Modal's long-supported `@app.function()` + `@modal.web_server()` pattern rather than requiring the newer `@app.server()` primitive.
 
 ## Authentication
 
-The deployment is protected with:
+The web server uses:
 
 ```python
-unauthenticated=False
+requires_proxy_auth=True
 ```
 
 Create a Modal proxy token:
@@ -60,11 +73,7 @@ Create a Modal proxy token:
 modal workspace proxy-tokens create
 ```
 
-Use the returned key and secret together as the bearer token:
-
-```text
-wk-....ws-....
-```
+Use the returned key and secret together as the bearer token.
 
 ## Test with curl
 
@@ -73,7 +82,7 @@ export GPT_OSS_URL="https://YOUR-MODAL-SERVER-URL"
 export MODAL_PROXY_TOKEN="wk-....ws-...."
 
 curl "$GPT_OSS_URL/v1/chat/completions" \
-  -H "Authorization: Bearer $MODAL_PROXY_TOKEN" \
+  -H "Modal-Authorization: Bearer $MODAL_PROXY_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "openai/gpt-oss-120b",
@@ -84,15 +93,6 @@ curl "$GPT_OSS_URL/v1/chat/completions" \
   }'
 ```
 
-## Test with the OpenAI Python client
-
-```bash
-pip install openai
-export GPT_OSS_BASE_URL="https://YOUR-MODAL-SERVER-URL"
-export MODAL_PROXY_TOKEN="wk-....ws-...."
-python test_client.py
-```
-
 ## Runtime configuration
 
 - GPU: H100
@@ -101,6 +101,6 @@ python test_client.py
 - Continuous batching enabled
 - Persistent Hugging Face model cache
 - 10-minute scale-down window
-- Protected Modal HTTP endpoint
+- Modal proxy authentication enabled
 
-The model weights are not committed to this repository. Modal downloads them into the persistent cache volume at runtime.
+The model weights are not committed to this repository.
