@@ -9,7 +9,7 @@ client = OpenAI(
     base_url=base_url,
     api_key="unused",
     default_headers={
-        "Authorization": f"Bearer {modal_proxy_token}",
+        "Modal-Authorization": f"Bearer {modal_proxy_token}",
     },
 )
 
