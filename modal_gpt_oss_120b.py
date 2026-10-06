@@ -33,42 +33,33 @@ image = (
 )
 
 
-@app.server(
+@app.function(
     image=image,
     gpu="H100",
-    port=PORT,
     volumes={"/root/.cache/huggingface": hf_cache},
-    unauthenticated=False,
-    startup_timeout=1800,
+    timeout=1800,
     scaledown_window=600,
-    target_concurrency=4,
-    max_concurrency=8,
+    allow_concurrent_inputs=8,
 )
-class TransformersServer:
-    @modal.enter()
-    def start(self):
-        self.proc = subprocess.Popen(
-            [
-                "transformers",
-                "serve",
-                MODEL_ID,
-                "--host",
-                "0.0.0.0",
-                "--port",
-                str(PORT),
-                "--continuous-batching",
-                "--dtype",
-                "bfloat16",
-                "--model-timeout",
-                "-1",
-            ]
-        )
-
-    @modal.exit()
-    def stop(self):
-        if getattr(self, "proc", None) is not None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+@modal.web_server(
+    PORT,
+    startup_timeout=1800,
+    requires_proxy_auth=True,
+)
+def transformers_server():
+    subprocess.Popen(
+        [
+            "transformers",
+            "serve",
+            MODEL_ID,
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(PORT),
+            "--continuous-batching",
+            "--dtype",
+            "bfloat16",
+            "--model-timeout",
+            "-1",
+        ]
+    )
