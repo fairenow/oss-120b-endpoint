@@ -3,4 +3,6 @@ venv/
 __pycache__/
 *.py[cod]
 .env
+env.local
+.env.*
 .DS_Store
