@@ -9,6 +9,7 @@ own GPU endpoint with the serving stack it actually needs.
 | `qwen36_35b_a3b` | `Qwen/Qwen3.6-35B-A3B` (FP8) | text / image / video chat + tools | **vLLM 0.31.0** | `/v1/chat/completions` | H100 |
 | `deepseek_v4_1_flash` | `deepseek-ai/DeepSeek-V4.1-Flash` | text / image chat + tools | **vLLM 0.31.0** | `/v1/chat/completions` | H200:8 |
 | `QwenImage2512` | `Qwen/Qwen-Image-2512` | text to image | `diffusers.QwenImagePipeline` | `/v1/images/generations` | H100 |
+| `QwenImageEdit2511` | `Qwen/Qwen-Image-Edit-2511` | reference-image editing | `diffusers.QwenImageEditPlusPipeline` | `/v1/images/edits` | H100 |
 | `Ltx25` | `Lightricks/LTX-2.5-Diffusers` | text to video | `diffusers.LTX2Pipeline` | `/v1/videos` | H100 |
 | `Wan22` | `Wan-AI/Wan2.2-TI2V-5B-Diffusers` | text to video | `diffusers.WanPipeline` | `/v1/videos` | L40S |
 | `HunyuanVideo15` | `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v` | text to video | `diffusers.HunyuanVideo15Pipeline` | `/v1/videos` | H100 |
@@ -338,3 +339,8 @@ Both the image and video endpoints return base64-encoded bytes in
   output or Wan's second guidance scale), add them to the request model and the
   call site.
 - GPU types and counts are per-endpoint and can be changed in `modal_models.py`.
+
+
+## Reference-image editing (proposed endpoint)
+
+`QwenImageEdit2511` is a separate H100-backed Modal class; it does not alter the existing `QwenImage2512` text-to-image endpoint. Deploy with `modal deploy modal_models.py` after reviewing compatibility and GPU memory requirements. Configure GSW Mail's `MODAL_IMAGE_EDIT_URL` to the new class's **/v1/images/edits** route and use the existing Modal proxy authorization token. The API accepts `{model:"image-edit",prompt:"...",image:{mime_type:"image/png",b64_json:"..."},response_format:"b64_json"}` and returns `{data:[{b64_json:"..."}]}`. This endpoint is currently **unverified on GPU** and must be exercised end-to-end before enabling production traffic.
