@@ -18,6 +18,7 @@ QWEN36 = "Qwen/Qwen3.6-35B-A3B-FP8"
 QWEN36_CANONICAL = "Qwen/Qwen3.6-35B-A3B"
 DEEPSEEK = "deepseek-ai/DeepSeek-V4.1-Flash"
 QWEN_IMAGE = "Qwen/Qwen-Image-2512"
+QWEN_IMAGE_EDIT = "Qwen/Qwen-Image-Edit-2511"
 LTX = "Lightricks/LTX-2.5-Diffusers"
 WAN = "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
 HUNYUAN = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v"
@@ -241,6 +242,59 @@ def build_image_app(pipeline, model_id):
     return api
 
 
+def build_image_edit_app(pipeline, model_id):
+    """Edit an uploaded source image; never fall back to text-to-image generation."""
+    from fastapi import FastAPI, HTTPException
+    from pydantic import BaseModel, Field
+    from PIL import Image, UnidentifiedImageError
+
+    class SourceImage(BaseModel):
+        mime_type: str
+        b64_json: str = Field(min_length=4, max_length=18_000_000)
+
+    class EditRequest(BaseModel):
+        model: str = "image-edit"
+        prompt: str = Field(min_length=3, max_length=4000)
+        image: SourceImage
+        response_format: str = "b64_json"
+
+    api = FastAPI(title=model_id)
+
+    @api.get("/v1/models")
+    def list_models():
+        return {"object": "list", "data": [{"id": model_id, "object": "model"}]}
+
+    @api.post("/v1/images/edits")
+    def edit(request: EditRequest):
+        import binascii
+        import torch
+
+        if request.response_format != "b64_json" or request.image.mime_type not in (
+            "image/png", "image/jpeg", "image/webp"
+        ):
+            raise HTTPException(status_code=422, detail="Unsupported image format")
+        try:
+            raw = base64.b64decode(request.image.b64_json, validate=True)
+            if len(raw) > 12 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="Image too large")
+            original = Image.open(io.BytesIO(raw))
+            original.verify()
+            original = Image.open(io.BytesIO(raw)).convert("RGB")
+            if original.width * original.height > 16_000_000:
+                raise HTTPException(status_code=413, detail="Image dimensions too large")
+        except (ValueError, binascii.Error, UnidentifiedImageError, OSError) as exc:
+            raise HTTPException(status_code=422, detail="Invalid source image") from exc
+        result = pipeline(image=original, prompt=request.prompt, num_inference_steps=30)
+        output = io.BytesIO()
+        result.images[0].save(output, format="PNG")
+        return {
+            "created": int(time.time()),
+            "data": [{"b64_json": base64.b64encode(output.getvalue()).decode("ascii")}],
+        }
+
+    return api
+
+
 def build_video_app(pipeline, model_id, defaults):
     from fastapi import FastAPI
     from pydantic import BaseModel
@@ -419,6 +473,30 @@ class QwenImage2512:
     @modal.asgi_app(requires_proxy_auth=True)
     def web(self):
         return build_image_app(self.pipeline, QWEN_IMAGE)
+
+
+@app.cls(
+    image=diffusion_image,
+    gpu="H100",
+    volumes={HF_HOME: hf_cache},
+    timeout=1800,
+    scaledown_window=600,
+)
+class QwenImageEdit2511:
+    @modal.enter()
+    def load(self):
+        import torch
+        from diffusers import QwenImageEditPlusPipeline
+
+        self.pipeline = QwenImageEditPlusPipeline.from_pretrained(
+            QWEN_IMAGE_EDIT,
+            torch_dtype=torch.bfloat16,
+        )
+        self.pipeline.to("cuda")
+
+    @modal.asgi_app(requires_proxy_auth=True)
+    def web(self):
+        return build_image_edit_app(self.pipeline, QWEN_IMAGE_EDIT)
 
 
 @app.cls(
