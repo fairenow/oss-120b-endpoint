@@ -14,6 +14,8 @@ PORT = 8000
 
 GPT_OSS = "openai/gpt-oss-120b"
 GPT_OSS_CANONICAL = "gpt-oss-120b"
+QWEN36 = "Qwen/Qwen3.6-35B-A3B-FP8"
+QWEN36_CANONICAL = "Qwen/Qwen3.6-35B-A3B"
 DEEPSEEK = "deepseek-ai/DeepSeek-V4.1-Flash"
 QWEN_IMAGE = "Qwen/Qwen-Image-2512"
 LTX = "Lightricks/LTX-2.5-Diffusers"
@@ -40,19 +42,6 @@ _ENV = {
     "HF_HUB_ENABLE_HF_TRANSFER": "1",
     "PYTHONUNBUFFERED": "1",
 }
-
-text_image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .pip_install(
-        "torch",
-        "transformers[serving]>=5.17.0",
-        "accelerate",
-        "kernels",
-        "triton>=3.4",
-        "huggingface_hub",
-    )
-    .env(_ENV)
-)
 
 diffusion_image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -95,25 +84,6 @@ vllm_image = (
 )
 
 
-def _serve_transformers(model_id):
-    subprocess.Popen(
-        [
-            "transformers",
-            "serve",
-            model_id,
-            "--host",
-            "0.0.0.0",
-            "--port",
-            str(PORT),
-            "--continuous-batching",
-            "--dtype",
-            "bfloat16",
-            "--model-timeout",
-            "-1",
-        ]
-    )
-
-
 def _serve_vllm():
     subprocess.Popen(
         [
@@ -131,6 +101,37 @@ def _serve_vllm():
             "openai",
             "--reasoning-parser",
             "openai_gptoss",
+            "--gpu-memory-utilization",
+            "0.95",
+            "--max-model-len",
+            "32768",
+            "--max-num-seqs",
+            "16",
+        ]
+    )
+
+
+def _serve_qwen36_vllm():
+    # Qwen3.6-35B-A3B: 35B MoE (3B activated) with a vision encoder, hybrid
+    # Gated DeltaNet + full attention layers. The FP8 checkpoint is served so a
+    # single H100 keeps headroom for the KV cache; BF16 is ~70GB and does not.
+    subprocess.Popen(
+        [
+            "vllm",
+            "serve",
+            QWEN36,
+            "--served-model-name",
+            QWEN36_CANONICAL,
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(PORT),
+            "--trust-remote-code",
+            "--enable-auto-tool-choice",
+            "--tool-call-parser",
+            "qwen3_coder",
+            "--reasoning-parser",
+            "qwen3",
             "--gpu-memory-utilization",
             "0.95",
             "--max-model-len",
@@ -299,23 +300,6 @@ def build_video_app(pipeline, model_id, defaults):
 
 
 @app.function(
-    image=text_image,
-    gpu="H100",
-    volumes={HF_HOME: hf_cache},
-    timeout=1800,
-    scaledown_window=600,
-    allow_concurrent_inputs=8,
-)
-@modal.web_server(
-    PORT,
-    startup_timeout=1800,
-    requires_proxy_auth=True,
-)
-def gpt_oss_120b():
-    _serve_transformers(GPT_OSS)
-
-
-@app.function(
     image=vllm_image,
     gpu="H100",
     volumes={HF_HOME: hf_cache, VLLM_CACHE: vllm_cache},
@@ -330,6 +314,23 @@ def gpt_oss_120b():
 )
 def gpt_oss_120b_vllm():
     _serve_vllm()
+
+
+@app.function(
+    image=vllm_image,
+    gpu="H100",
+    volumes={HF_HOME: hf_cache, VLLM_CACHE: vllm_cache},
+    timeout=1800,
+    scaledown_window=600,
+    allow_concurrent_inputs=16,
+)
+@modal.web_server(
+    PORT,
+    startup_timeout=1800,
+    requires_proxy_auth=True,
+)
+def qwen36_35b_a3b():
+    _serve_qwen36_vllm()
 
 
 @app.function(image=vllm_image, timeout=600)
@@ -359,6 +360,10 @@ def vllm_selftest():
 
         archs = ModelRegistry.get_supported_archs()
         print("HAS_DeepseekV41ForCausalLM:", "DeepseekV41ForCausalLM" in archs)
+        print(
+            "HAS_Qwen3_5MoeForConditionalGeneration:",
+            "Qwen3_5MoeForConditionalGeneration" in archs,
+        )
     except Exception as exc:  # noqa: BLE001
         print("MODEL_REGISTRY_FAILED:", repr(exc))
 

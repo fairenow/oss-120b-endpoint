@@ -71,7 +71,8 @@ def test_video(env_var, output="out.mp4"):
 
 
 EXAMPLES = {
-    "gpt-oss": lambda: test_text("GPT_OSS_BASE_URL", "openai/gpt-oss-120b"),
+    "gpt-oss": lambda: test_text("GPT_OSS_BASE_URL", "gpt-oss-120b"),
+    "qwen": lambda: test_text("QWEN36_BASE_URL", "Qwen/Qwen3.6-35B-A3B"),
     "deepseek": lambda: test_text("DEEPSEEK_BASE_URL", "deepseek-ai/DeepSeek-V4.1-Flash"),
     "image": lambda: test_image("QWEN_IMAGE_BASE_URL"),
     "ltx": lambda: test_video("LTX_BASE_URL", "ltx.mp4"),

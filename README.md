@@ -5,8 +5,8 @@ own GPU endpoint with the serving stack it actually needs.
 
 | Endpoint | Model (Hugging Face repo) | Task | Serving stack | Route | GPU |
 | --- | --- | --- | --- | --- | --- |
-| `gpt_oss_120b` | `openai/gpt-oss-120b` | text chat | `transformers serve` (rollback) | `/v1/chat/completions` | H100 |
-| `gpt_oss_120b_vllm` | `openai/gpt-oss-120b` | text chat + tools | **vLLM 0.31.0** (staging) | `/v1/chat/completions` | H100 |
+| `gpt_oss_120b_vllm` | `openai/gpt-oss-120b` | text chat + tools | **vLLM 0.31.0** | `/v1/chat/completions` | H100 |
+| `qwen36_35b_a3b` | `Qwen/Qwen3.6-35B-A3B` (FP8) | text / image / video chat + tools | **vLLM 0.31.0** | `/v1/chat/completions` | H100 |
 | `deepseek_v4_1_flash` | `deepseek-ai/DeepSeek-V4.1-Flash` | text / image chat + tools | **vLLM 0.31.0** | `/v1/chat/completions` | H200:8 |
 | `QwenImage2512` | `Qwen/Qwen-Image-2512` | text to image | `diffusers.QwenImagePipeline` | `/v1/images/generations` | H100 |
 | `Ltx25` | `Lightricks/LTX-2.5-Diffusers` | text to video | `diffusers.LTX2Pipeline` | `/v1/videos` | H100 |
@@ -17,12 +17,13 @@ own GPU endpoint with the serving stack it actually needs.
 
 These models are two different modalities and cannot share one server:
 
-- `transformers serve` is an OpenAI-compatible server for **text / multimodal LLM**
-  inference. It does not expose image or video generation.
+- vLLM is an OpenAI-compatible server for **text / multimodal LLM** inference. It
+  does not expose image or video generation.
 - Qwen-Image, LTX-2.5, Wan 2.2, and HunyuanVideo 1.5 are **diffusion** pipelines.
   They need `diffusers` and their own FastAPI routes (`/v1/images/generations`,
   `/v1/videos`).
-- GPU memory is per-container. gpt-oss-120B fits an H100; DeepSeek-V4.1-Flash is a
+- GPU memory is per-container. gpt-oss-120B and Qwen3.6-35B-A3B (FP8) each fit an
+  H100; DeepSeek-V4.1-Flash is a
   ~552B-backbone + ~196B-Engram multimodal MoE (~476 GiB of weights) that needs at
   least 8×H200 or a Blackwell node. It cannot run on H100 (80 GB) and cannot be
   co-located with gpt-oss.
@@ -35,8 +36,8 @@ mounts the shared Hugging Face cache volume so weights survive container shutdow
 ```text
 Clients
    |
-   +-- /v1/chat/completions ...... gpt-oss-120b (transformers serve, H100)  [rollback]
-   +-- /v1/chat/completions ...... gpt-oss-120b (vLLM, H100)                [staging]
+   +-- /v1/chat/completions ...... gpt-oss-120b (vLLM, H100)
+   +-- /v1/chat/completions ...... Qwen3.6-35B-A3B (vLLM, H100)
    +-- /v1/chat/completions ...... DeepSeek-V4.1-Flash (vLLM, H200:8)
    +-- /v1/images/generations .... Qwen-Image-2512 (FastAPI + diffusers, H100)
    +-- /v1/videos ................ LTX-2.5 (FastAPI + diffusers, H100)
@@ -48,11 +49,11 @@ Clients
         gpt-oss-120b-hf-cache + gpt-oss-120b-vllm-cache volumes
 ```
 
-## GPT-OSS on vLLM (staging)
+## GPT-OSS on vLLM
 
 `transformers serve` does not parse gpt-oss's Harmony channels, so tool calls leaked
-into `content` as text and no structured `tool_calls` were returned. The staging
-endpoint `gpt_oss_120b_vllm` runs **vLLM `0.31.0`** with the documented GPT-OSS parsers:
+into `content` as text and no structured `tool_calls` were returned. The endpoint
+`gpt_oss_120b_vllm` runs **vLLM `0.31.0`** with the documented GPT-OSS parsers:
 
 ```text
 vllm serve openai/gpt-oss-120b \
@@ -67,9 +68,6 @@ Parser names are validated against the installed version by `vllm_selftest`
 (`modal run modal_models.py::vllm_selftest`): `openai` and `openai_gptoss` are both
 registered in vLLM 0.31.0. No built-in/browsing/python tool server is enabled —
 only user-supplied functions are parsed; executing them stays the caller's job.
-
-The original `gpt_oss_120b` (`transformers serve`) endpoint is preserved as the
-rollback option.
 
 ### Verified results (H100 SXM5, single GPU)
 
@@ -94,6 +92,41 @@ Behavioral notes:
 - Integer arguments are correctly coerced (`"noon"` → `{"hour": 12}`).
 - gpt-oss-120b did **not** emit parallel tool calls in testing (one call per turn,
   even with two distinct tools). Callers should not assume parallelism.
+
+
+## Qwen3.6-35B-A3B
+
+`qwen36_35b_a3b` serves `Qwen/Qwen3.6-35B-A3B` — a 35B-parameter MoE (3B activated)
+with a vision encoder and 262k-token native context, covering text, image, and video
+input. The **FP8** checkpoint (`Qwen/Qwen3.6-35B-A3B-FP8`, ~37.5 GiB) is served on a
+single H100; the BF16 weights (~70 GiB) would leave no room for a KV cache.
+
+```text
+vllm serve Qwen/Qwen3.6-35B-A3B-FP8 \
+  --served-model-name Qwen/Qwen3.6-35B-A3B \
+  --trust-remote-code \
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_coder \
+  --reasoning-parser qwen3 \
+  --gpu-memory-utilization 0.95 --max-model-len 32768 --max-num-seqs 16
+```
+
+Qwen's recommended vLLM recipe (`vllm>=0.19.0`; this repo pins 0.31.0) uses the
+`qwen3` reasoning parser and `qwen3_coder` tool parser with
+`--enable-auto-tool-choice`; both are validated against the installed build by
+`vllm_selftest`, along with the `Qwen3_5MoeForConditionalGeneration` architecture.
+
+Behavioral notes:
+
+- Qwen3.6 thinks by default; thinking content arrives separately from the final
+  response. `transformers`-style `/nothink` is **not** supported, but thinking can be
+  disabled per request via `chat_template_kwargs: {"enable_thinking": false}`.
+- It is a multimodal chat model: images/videos are passed inline as OpenAI
+  `image_url` / `video_url` content parts (not via the `/v1/images` diffusion route).
+- Built-in agent tools (`qwen3_coder` tool-call parser) are enabled; only
+  user-supplied functions are parsed — executing them stays the caller's job.
+- The native 262k context is capped at 32k in this deployment so a single H100 keeps
+  KV-cache headroom; raise `--max-model-len` if the model is scaled to more GPUs.
 
 
 ## DeepSeek-V4.1-Flash serving audit
@@ -187,8 +220,8 @@ and scaled on its own.
 
 The deployment uses Modal's long-supported `@app.function()` + `@modal.web_server()`
 pattern for the text servers and `@app.cls()` + `@modal.asgi_app()` for the diffusion
-servers. `modal_gpt_oss_120b.py` is the original single-model app and is superseded
-by `modal_models.py`.
+servers. `modal_gpt_oss_120b.py` is the original single-model `transformers serve`
+app and is superseded by `modal_models.py`.
 
 ## Authentication
 
@@ -214,10 +247,12 @@ Text (OpenAI-compatible):
 
 ```bash
 export GPT_OSS_BASE_URL="https://YOUR-GPT-OSS-URL"
+export QWEN36_BASE_URL="https://YOUR-QWEN36-URL"
 export DEEPSEEK_BASE_URL="https://YOUR-DEEPSEEK-URL"
 export MODAL_PROXY_TOKEN="wk-....ws-...."
 
 python test_client.py gpt-oss
+python test_client.py qwen
 python test_client.py deepseek
 ```
 
@@ -242,7 +277,7 @@ curl "$GPT_OSS_BASE_URL/v1/chat/completions" \
   -H "Authorization: Bearer $MODAL_PROXY_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "openai/gpt-oss-120b",
+    "model": "gpt-oss-120b",
     "messages": [{"role": "user", "content": "Explain mixture-of-experts models."}],
     "max_tokens": 500
   }'
@@ -275,8 +310,9 @@ Both the image and video endpoints return base64-encoded bytes in
   the original single-model deployment, so its download is not repeated; the volume
   now caches every model in the app)
 - vLLM compile cache volume: `gpt-oss-120b-vllm-cache` (`VLLM_CACHE_ROOT`)
-- gpt-oss-120B (rollback): H100, `transformers serve`, continuous batching, 10-minute scale-down
-- gpt-oss-120B (staging): H100, vLLM 0.31.0, `--enable-auto-tool-choice`, 10-minute scale-down
+- gpt-oss-120B: H100, vLLM 0.31.0, `--enable-auto-tool-choice`, 10-minute scale-down
+- Qwen3.6-35B-A3B: H100, vLLM 0.31.0, FP8 checkpoint, `qwen3_coder`/`qwen3` parsers,
+  10-minute scale-down, 32k context cap
 - DeepSeek-V4.1-Flash: H200:8, vLLM 0.31.0, `deepseek_v41` tokenizer/tool/reasoning
   parsers, 30-minute scale-down, 90-minute startup timeout
 - Diffusion servers: FastAPI inside `@app.cls`, model loaded once in `@modal.enter()`
@@ -289,6 +325,10 @@ Both the image and video endpoints return base64-encoded bytes in
   **not** H100. The vLLM config uses tensor parallelism (`--tensor-parallel-size 8`)
   and the `deepseek_v41` parsers. This is set up but has **not been run live**; see
   the audit section above for cost and cold-start expectations.
+- **Qwen3.6-35B-A3B** runs the FP8 checkpoint on one H100 (~37.5 GiB of weights) so
+  the remaining ~38 GiB feeds the KV cache; the BF16 checkpoint (~70 GiB) would not
+  fit alongside a usable cache on 80 GB. Thinking is on by default, so callers should
+  budget for reasoning tokens (or pass `chat_template_kwargs: {"enable_thinking": false}`).
 - **Video generation is slow** (tens of seconds to minutes per clip). Generation
   defaults are conservative; increase `num_frames`, resolution, or steps per request
   as your budget allows.

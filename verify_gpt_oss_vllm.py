@@ -4,7 +4,7 @@ Stdlib only (urllib/json) so it runs with the system python3.
 
 Usage:
     source env.local
-    export GPT_OSS_VLLM_BASE_URL="https://ramon-williams-jr--multi-model-endpoints-gpt-oss-120b-vllm.modal.run"
+    export GPT_OSS_BASE_URL="https://ramon-williams-jr--multi-model-endpoints-gpt-oss-120b-vllm.modal.run"
     python3 verify_gpt_oss_vllm.py
 """
 
@@ -15,12 +15,12 @@ import time
 import urllib.error
 import urllib.request
 
-BASE = os.environ.get("GPT_OSS_VLLM_BASE_URL", "").rstrip("/")
+BASE = os.environ.get("GPT_OSS_BASE_URL", "").rstrip("/")
 TOKEN = os.environ.get("MODAL_PROXY_TOKEN", "")
 MODEL = os.environ.get("GPT_OSS_MODEL_ID", "gpt-oss-120b")
 
 if not BASE or not TOKEN:
-    print("FAIL: set GPT_OSS_VLLM_BASE_URL and MODAL_PROXY_TOKEN")
+    print("FAIL: set GPT_OSS_BASE_URL and MODAL_PROXY_TOKEN")
     sys.exit(1)
 
 HEADERS = {
