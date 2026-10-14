@@ -1,6 +1,8 @@
 import base64
 import inspect
 import io
+import logging
+import threading
 import os
 import subprocess
 import tempfile
@@ -40,7 +42,7 @@ vllm_cache = modal.Volume.from_name(
 
 _ENV = {
     "HF_HOME": HF_HOME,
-    "HF_HUB_ENABLE_HF_TRANSFER": "1",
+    "HF_XET_HIGH_PERFORMANCE": "1",
     "PYTHONUNBUFFERED": "1",
 }
 
@@ -73,13 +75,12 @@ vllm_image = (
     .entrypoint([])
     .uv_pip_install(
         f"vllm=={VLLM_VERSION}",
-        "huggingface_hub[hf_transfer]",
+        "huggingface_hub",
     )
     .env(
         {
             **_ENV,
             "VLLM_CACHE_ROOT": VLLM_CACHE,
-            "VLLM_USE_V1": "1",
         }
     )
 )
@@ -194,7 +195,7 @@ def _extract_frames(result):
 
 
 def build_image_app(pipeline, model_id):
-    from fastapi import FastAPI
+    from fastapi import FastAPI, HTTPException
     from pydantic import BaseModel
 
     class ImageRequest(BaseModel):
@@ -207,6 +208,12 @@ def build_image_app(pipeline, model_id):
         seed: int | None = None
 
     api = FastAPI(title=model_id)
+    generation_lock = threading.Lock()
+    logger = logging.getLogger("qwen-image")
+
+    @api.get("/health")
+    def health():
+        return {"status": "ready", "model": model_id}
 
     @api.get("/v1/models")
     def list_models():
@@ -215,7 +222,21 @@ def build_image_app(pipeline, model_id):
     @api.post("/v1/images/generations")
     def generate(request: ImageRequest):
         import torch
+        if not request.prompt.strip():
+            raise HTTPException(status_code=422, detail="Prompt must not be empty")
+        if request.width < 256 or request.height < 256 or request.width > 2048 or request.height > 2048 or request.width % 16 or request.height % 16:
+            raise HTTPException(status_code=422, detail="Image dimensions must be multiples of 16 between 256 and 2048")
+        if not 1 <= request.num_inference_steps <= 100:
+            raise HTTPException(status_code=422, detail="Inference steps must be between 1 and 100")
+        if not generation_lock.acquire(blocking=False):
+            raise HTTPException(status_code=503, detail="Image worker busy; retry with the same job identifier")
+        try:
+            return _generate_locked(request, torch)
+        finally:
+            generation_lock.release()
 
+    def _generate_locked(request, torch):
+        started = time.monotonic()
         generator = None
         if request.seed is not None:
             generator = torch.Generator(device="cuda").manual_seed(request.seed)
@@ -230,10 +251,18 @@ def build_image_app(pipeline, model_id):
             guidance_scale=request.guidance_scale,
             generator=generator,
         )
-        image = result.images[0]
+        images = getattr(result, "images", None)
+        if not images or images[0] is None:
+            raise HTTPException(status_code=502, detail="Image model returned no image")
+        image = images[0]
+        if not hasattr(image, "save"):
+            raise HTTPException(status_code=502, detail="Image model returned invalid image")
 
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
+        if not buffer.getvalue().startswith(b"\x89PNG\r\n\x1a\n"):
+            raise HTTPException(status_code=502, detail="Image encoding was invalid")
+        logger.info("image_generation_succeeded model=%s duration_ms=%d bytes=%d", model_id, int((time.monotonic()-started)*1000), buffer.tell())
         return {
             "created": int(time.time()),
             "data": [{"b64_json": base64.b64encode(buffer.getvalue()).decode()}],
@@ -358,9 +387,11 @@ def build_video_app(pipeline, model_id, defaults):
     gpu="H100",
     volumes={HF_HOME: hf_cache, VLLM_CACHE: vllm_cache},
     timeout=1800,
-    scaledown_window=600,
-    allow_concurrent_inputs=32,
+    scaledown_window=1800,
+    min_containers=0,
+    max_containers=2,
 )
+@modal.concurrent(max_inputs=32)
 @modal.web_server(
     PORT,
     startup_timeout=1800,
@@ -375,9 +406,11 @@ def gpt_oss_120b_vllm():
     gpu="H100",
     volumes={HF_HOME: hf_cache, VLLM_CACHE: vllm_cache},
     timeout=1800,
-    scaledown_window=600,
-    allow_concurrent_inputs=16,
+    scaledown_window=1200,
+    min_containers=0,
+    max_containers=2,
 )
+@modal.concurrent(max_inputs=16)
 @modal.web_server(
     PORT,
     startup_timeout=1800,
@@ -440,8 +473,8 @@ def vllm_selftest():
     volumes={HF_HOME: hf_cache, VLLM_CACHE: vllm_cache},
     timeout=7200,
     scaledown_window=1800,
-    allow_concurrent_inputs=8,
-)
+ )
+@modal.concurrent(max_inputs=8)
 @modal.web_server(
     PORT,
     startup_timeout=5400,
@@ -456,7 +489,9 @@ def deepseek_v4_1_flash():
     gpu="H100",
     volumes={HF_HOME: hf_cache},
     timeout=1800,
-    scaledown_window=600,
+    scaledown_window=1200,
+    min_containers=0,
+    max_containers=1,
 )
 class QwenImage2512:
     @modal.enter()
